@@ -255,6 +255,17 @@ export function liveActivityToolStatus(status: string | undefined, presentTense:
   return "completed";
 }
 
+const swarmWorkerStatusUnavailable = msg("Swarm worker status unavailable");
+
+function isAntigravitySwarmLaunch(item: OrchestrationV2TurnItem | undefined): boolean {
+  return (
+    item?.type === "dynamic_tool" &&
+    item.nativeItemRef?.driver === "antigravity" &&
+    item.toolName === "Run swarm" &&
+    asRecord(item.input)?.action === "add"
+  );
+}
+
 export function resolveWorkEntryToolPresentation(
   entry: Pick<
     WorkLogPresentationEntry,
@@ -263,6 +274,13 @@ export function resolveWorkEntryToolPresentation(
   fallbackStatus?: "inProgress" | "completed",
   resolve: MFunctionType = mFallback,
 ) {
+  if (isAntigravitySwarmLaunch(entry.structuredPayload)) {
+    return {
+      displayName: resolve(swarmWorkerStatusUnavailable),
+      icon: undefined,
+      action: undefined,
+    };
+  }
   const definition = resolveT3McpToolDefinition(
     workEntryToolName(entry),
     workEntryToolInput(entry),
@@ -697,7 +715,9 @@ export function summarizeToolGroup(
     }
   >();
   const sources = new Map<string, ToolActivitySource>();
+  let hasSwarmLaunch = false;
   for (const entry of entries) {
+    hasSwarmLaunch ||= isAntigravitySwarmLaunch(entry.structuredPayload);
     const t3Action = resolveT3McpSummaryAction(
       workEntryToolName(entry),
       t3ToolSummaryCall(entry).input,
@@ -765,6 +785,7 @@ export function summarizeToolGroup(
       ),
     );
   }
+  if (hasSwarmLaunch) labels.unshift(resolve(swarmWorkerStatusUnavailable));
   const sentenceLabels = labels.map((label, index) =>
     index === 0 ? label : label.charAt(0).toLowerCase() + label.slice(1),
   );

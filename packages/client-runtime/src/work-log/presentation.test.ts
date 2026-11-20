@@ -1,34 +1,44 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@t3tools/contracts";
+import {
+  ProviderDriverKind,
+  ThreadId,
+  TurnItemId,
+  type OrchestrationV2TurnItem,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import {
   resolveWorkEntryToolPresentation,
+  summarizeToolGroup,
   toolItemForDisplay,
   type WorkLogPresentationEntry,
   workEntryIndicatesToolFailure,
   workEntryDisplayIndicatesToolFailure,
 } from "./presentation.js";
 
+const completedItem = {
+  threadId: ThreadId.make("thread"),
+  runId: null,
+  nodeId: null,
+  providerThreadId: null,
+  providerTurnId: null,
+  nativeItemRef: null,
+  parentItemId: null,
+  ordinal: 1,
+  status: "completed",
+  title: null,
+  startedAt: null,
+  completedAt: null,
+  updatedAt: DateTime.makeUnsafe("2026-09-08T00:00:00.000Z"),
+} as const;
+
 function commandItem(
   fields: Partial<Extract<OrchestrationV2TurnItem, { type: "command_execution" }>> = {},
 ): OrchestrationV2TurnItem {
   return {
+    ...completedItem,
     id: TurnItemId.make("command"),
-    threadId: ThreadId.make("thread"),
-    runId: null,
-    nodeId: null,
-    providerThreadId: null,
-    providerTurnId: null,
-    nativeItemRef: null,
-    parentItemId: null,
-    ordinal: 1,
-    status: "completed",
-    title: null,
-    startedAt: null,
-    completedAt: null,
-    updatedAt: DateTime.makeUnsafe("2026-09-08T00:00:00.000Z"),
     type: "command_execution",
     input: 'rg "command not found"',
     ...fields,
@@ -202,5 +212,80 @@ describe("resolveWorkEntryToolPresentation", () => {
         toolData: { server: "another-server", tool: "preview_click" },
       }),
     ).toBeNull();
+  });
+});
+
+describe("Antigravity swarm activity", () => {
+  const item = {
+    ...completedItem,
+    id: TurnItemId.make("swarm"),
+    type: "dynamic_tool",
+    nativeItemRef: {
+      driver: ProviderDriverKind.make("antigravity"),
+      nativeId: "swarm-call",
+      strength: "weak",
+    },
+    title: "Run swarm",
+    toolName: "Run swarm",
+    input: { action: "add", name: "Reviewer" },
+  } satisfies OrchestrationV2TurnItem;
+  const launch = {
+    id: "swarm",
+    createdAt: "2026-11-20T00:00:00.000Z",
+    label: "Run swarm",
+    tone: "tool",
+    itemType: "dynamic_tool",
+    structuredPayload: toolItemForDisplay(item),
+  } satisfies WorkLogPresentationEntry;
+
+  it("shows the worker visibility limit on the launch without changing the tool lifecycle", () => {
+    expect(resolveWorkEntryToolPresentation(launch, "completed")?.displayName).toBe(
+      "Swarm worker status unavailable",
+    );
+    expect(launch.structuredPayload.status).toBe("completed");
+    expect(workEntryDisplayIndicatesToolFailure(launch)).toBe(false);
+    expect(workEntryDisplayIndicatesToolFailure({ ...launch, toolLifecycleStatus: "failed" })).toBe(
+      true,
+    );
+  });
+
+  it("keeps the caveat first in a folded mixed group, even for a source-tagged launch", () => {
+    const entries = [
+      { ...launch, id: "command", itemType: "command_execution", structuredPayload: commandItem() },
+      {
+        id: "edit",
+        label: "Edited file",
+        createdAt: launch.createdAt,
+        tone: "tool",
+        itemType: "file_change",
+      },
+      { ...launch, toolSource: { key: "agy", name: "Antigravity", kind: "integration" } },
+      { ...launch, id: "second-launch" },
+    ] satisfies WorkLogPresentationEntry[];
+    const summary = summarizeToolGroup(entries).summary;
+    expect(summary.startsWith("Swarm worker status unavailable")).toBe(true);
+    expect(summary.match(/status unavailable/g)).toHaveLength(1);
+    expect(summary).toContain("command");
+  });
+
+  it("preserves ordinary presentation for lookalike and non-launch calls", () => {
+    const entries = [
+      { label: "Run swarm" },
+      {
+        ...launch,
+        structuredPayload: {
+          ...item,
+          nativeItemRef: { ...item.nativeItemRef, driver: ProviderDriverKind.make("codex") },
+        },
+      },
+      { ...launch, structuredPayload: { ...item, input: { action: "status" } } },
+      { ...launch, structuredPayload: { ...item, toolName: "custom.swarm" } },
+    ] satisfies Array<Parameters<typeof resolveWorkEntryToolPresentation>[0]>;
+    expect(entries.map((entry) => resolveWorkEntryToolPresentation(entry))).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
   });
 });
