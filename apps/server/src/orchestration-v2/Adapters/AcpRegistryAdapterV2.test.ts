@@ -451,12 +451,20 @@ const claudeUnrelatedChildren = [
   }),
 ];
 
+const localAgy = (commandPath: string) => ({
+  source: "local",
+  commandPath,
+  commandArgs: ["acp"],
+});
+
 describe("AcpRegistryAdapterV2", () => {
   it.effect.each([
-    { commandPath: "/root/.local/bin/agy", offers: 1 },
-    { commandPath: "C:\\tools\\agy.exe", offers: 1 },
-    { commandPath: "/opt/bin/other-agent", offers: 0 },
-  ])("continues late output only for agy ($commandPath)", ({ commandPath, offers }) =>
+    { agent: "/root/.local/bin/agy", settings: localAgy("/root/.local/bin/agy"), offers: 1 },
+    { agent: "agy.exe", settings: localAgy("C:\\tools\\agy.exe"), offers: 1 },
+    { agent: "local other-agent", settings: localAgy("/opt/bin/other-agent"), offers: 0 },
+    { agent: "registry antigravity-acp", settings: "antigravity-acp", offers: 1 },
+    { agent: "registry other-agent", settings: "other-agent", offers: 0 },
+  ])("routes late Antigravity output ($agent)", ({ settings, offers }) =>
     Effect.gen(function* () {
       const gate = makeProviderReplayGate(["wake"]);
       const update = (sessionUpdate: Record<string, unknown>) =>
@@ -474,7 +482,7 @@ describe("AcpRegistryAdapterV2", () => {
               method: "initialize",
               result: {
                 protocolVersion: 1,
-                agentInfo: { name: "Antigravity ACP Server", version: "1.5.9" },
+                agentInfo: { name: "Antigravity ACP Server", version: "1.5.12" },
                 agentCapabilities: { loadSession: true },
                 authMethods: [],
               },
@@ -504,13 +512,13 @@ describe("AcpRegistryAdapterV2", () => {
         ],
         gate,
         true,
-        { source: "local", commandPath, commandArgs: ["acp"] },
+        settings,
       );
       yield* session.runtime.startTurn(session.turnInput(1));
       assert.equal((yield* session.terminal).status, "completed");
       gate.release("wake");
       yield* session.throughMarker("late output received");
-      assert.lengthOf(session.offers, offers, "late output must only wake agy");
+      assert.lengthOf(session.offers, offers, "late output must only wake Antigravity");
       if (offers === 0) return;
       yield* session.offers[0]!.dispatchIfCurrent!(Effect.void);
       yield* session.runtime.startTurn(session.turnInput(2, { continuation: true }));
@@ -523,11 +531,39 @@ describe("AcpRegistryAdapterV2", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect.each(["approval-required", "full-access"] as const)(
-    "continues an agy permission request after the prompt settles (%s)",
-    (runtimeMode) =>
+  it.effect.each([
+    { source: "local", kind: "permission", runtimeMode: "approval-required" },
+    { source: "local", kind: "permission", runtimeMode: "full-access" },
+    { source: "registry", kind: "permission", runtimeMode: "approval-required" },
+    { source: "registry", kind: "question", runtimeMode: "approval-required" },
+  ] as const)(
+    "continues an Antigravity $kind after its prompt settles ($source, $runtimeMode)",
+    ({ source, kind, runtimeMode }) =>
       Effect.gen(function* () {
         const gate = makeProviderReplayGate(["wake", "reply"]);
+        const method = kind === "permission" ? "session/request_permission" : "elicitation/create";
+        const params =
+          kind === "permission"
+            ? {
+                sessionId: CLAUDE_ROOT_SESSION,
+                toolCall: {
+                  toolCallId: "late-command",
+                  title: "Run command",
+                  kind: "execute",
+                  status: "pending",
+                },
+                options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+              }
+            : {
+                sessionId: CLAUDE_ROOT_SESSION,
+                mode: "form",
+                message: "Which file?",
+                requestedSchema: {
+                  type: "object",
+                  properties: { file: { type: "string", enum: ["a.ts", "b.ts"] } },
+                  required: ["file"],
+                },
+              };
         const session = yield* openClaudeReplaySession(
           [
             {
@@ -541,7 +577,7 @@ describe("AcpRegistryAdapterV2", () => {
                 method: "initialize",
                 result: {
                   protocolVersion: 1,
-                  agentInfo: { name: "Antigravity ACP Server", version: "1.5.9" },
+                  agentInfo: { name: "Antigravity ACP Server", version: "1.5.12" },
                   agentCapabilities: { loadSession: true },
                   authMethods: [],
                 },
@@ -561,34 +597,24 @@ describe("AcpRegistryAdapterV2", () => {
             {
               type: "emit_inbound",
               label: "wake",
-              frame: {
-                kind: "request",
-                method: "session/request_permission",
-                params: {
-                  sessionId: CLAUDE_ROOT_SESSION,
-                  toolCall: {
-                    toolCallId: "late-command",
-                    title: "Run command",
-                    kind: "execute",
-                    status: "pending",
-                  },
-                  options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
-                },
-              },
+              frame: { kind: "request", method, params },
             },
-            claudeMarker("late permission received"),
+            claudeMarker("late request received"),
             {
               type: "expect_outbound",
               frame: {
                 kind: "response",
-                method: "session/request_permission",
-                result: { outcome: { outcome: "selected", optionId: "allow" } },
+                method,
+                result:
+                  kind === "permission"
+                    ? { outcome: { outcome: "selected", optionId: "allow" } }
+                    : { action: "accept", content: { file: "a.ts" } },
               },
             },
             {
               ...claudeFrames.update(CLAUDE_ROOT_SESSION, {
                 sessionUpdate: "agent_message_chunk",
-                content: { type: "text", text: "Command approved." },
+                content: { type: "text", text: "Continuing after the response." },
               }),
               label: "reply",
             },
@@ -601,15 +627,15 @@ describe("AcpRegistryAdapterV2", () => {
           ],
           gate,
           true,
-          { source: "local", commandPath: "/root/.local/bin/agy", commandArgs: ["acp"] },
+          source === "local" ? localAgy("/root/.local/bin/agy") : "antigravity-acp",
           undefined,
           runtimeMode,
         );
         yield* session.runtime.startTurn(session.turnInput(1));
         assert.equal((yield* session.terminal).status, "completed");
         gate.release("wake");
-        yield* session.throughMarker("late permission received");
-        assert.lengthOf(session.offers, 1, "a permission request must offer a continuation");
+        yield* session.throughMarker("late request received");
+        assert.lengthOf(session.offers, 1, "a late request must offer a continuation");
         yield* session.offers[0]!.dispatchIfCurrent!(Effect.void);
         yield* session.runtime.startTurn(session.turnInput(2, { continuation: true }));
         if (runtimeMode === "approval-required") {
@@ -618,11 +644,14 @@ describe("AcpRegistryAdapterV2", () => {
               event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
           );
           const request = events.at(-1)!;
-          if (request.type !== "runtime_request.updated") throw new Error("Missing approval");
+          if (request.type !== "runtime_request.updated") throw new Error("Missing request");
+          assert.equal(request.runtimeRequest.kind === "user_input", kind === "question");
           yield* TestClock.adjust("5 seconds");
           yield* session.runtime.respondToRuntimeRequest({
             requestId: request.runtimeRequest.id,
-            decision: "accept",
+            ...(kind === "permission"
+              ? { decision: "accept" as const }
+              : { answers: { file: "a.ts" } }),
           });
         }
         // The model can be silent longer than the finalize debounce before it goes on.
@@ -633,7 +662,8 @@ describe("AcpRegistryAdapterV2", () => {
         assert.isTrue(
           output.some(
             (event) =>
-              event.type === "message.updated" && event.message.text === "Command approved.",
+              event.type === "message.updated" &&
+              event.message.text === "Continuing after the response.",
           ),
         );
         assert.isFalse(output.some((event) => event.type === "turn.terminal"));
